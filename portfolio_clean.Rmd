@@ -1,0 +1,229 @@
+---
+title: "Portfolio EconomistAtLarge"
+output: html_notebook
+---
+
+
+
+
+Dmat:  The covariance table (matrix).  We will calculate this based on the data frame of returns.
+dvec:  This is a vector of the average returns for each security.  To find the minimium portfolio variance, we set these all to zero.  To find points along the efficient frontier, we use a for loop to allow these returns to vary.
+Amat:  This is the matrix of constraints.  This can be a bit complicated–hang in there as we explain a little behind creating a matrix that imposes constraints.  For those not steeped in algebraic matrix math, it may be easiest to learn by examing the examples.  In the example, we use Amat to impose three distinct constraints: the portfolio weights must sum to 1, whether we allow any weights to be negative (implying short-selling and leverage), and whether there is a limit to any individual weight (to avoid high concentrations in just one security).
+bvec:  Think of this as the legend to the Amat.  This is a vector of values that is matched up against the Amat matrix to enforce our constraints.  Again, if you are not familiar with matrix math, it may be easiest to learn by looking at the example and playing around with the code.
+meq: This simply tells the solve.QP function which columns in the Amat matrix to treat as equality constraints.  In our example, we only have one (the weights must sum to 1).  The others are all inequality constraints (for example, weight must be > 0).  We simply assign 1 to meq.
+factorized:  We do not use this argument, you can ignore it.
+
+
+
+```{r}
+# Economist at Large
+# Modern Portfolio Theory
+# Use solve.QP to solve for efficient frontier
+# Last Edited 5/3/13
+ 
+# This file uses the solve.QP function in the quadprog package to solve for the
+# efficient frontier.
+# Since the efficient frontier is a parabolic function, we can find the solution
+# that minimizes portfolio variance and then vary the risk premium to find
+# points along the efficient frontier. Then simply find the portfolio with the
+# largest Sharpe ratio (expected return / sd) to identify the most
+# efficient portfolio
+ 
+library(stockPortfolio) # Base package for retrieving returns
+library(ggplot2) # Used to graph efficient frontier
+library(reshape2) # Used to melt the data
+library(quadprog) #Needed for solve.QP
+library("quantmod")
+```
+
+
+```{r}  
+# Create the portfolio using ETFs, incl. hypothetical non-efficient allocation
+stocks <- c(
+ "SPY" = .20,
+ "EFA" = .10,
+ "IWM" = .10)
+start="2017-06-01"
+stop="2017-09-01"
+# Retrieve returns, from earliest start date possible (where all stocks have data) through most recent date
+returns <- getSymbols(names(stocks[-1]), src="yahoo", from=start, to=stop)
+#Currently, drop index
+```
+
+```{r}
+#[1] "SPY" "EFA" "IWM" "VWO"
+wReturns <- weeklyReturn(SPY)
+wReturns1 <- weeklyReturn(EFA)
+wReturns2 <- weeklyReturn(IWM)
+#wReturns3 <- weeklyReturn(VWO)
+wReturns <- data.frame(wReturns,wReturns1,wReturns2)
+wReturns[0:7,]
+# Indexed by the Friday dates
+```
+
+```{r}
+# Let's instead try reading it from file written from Python code. For each Friday, PercentReturns = 100.*(fridays['Adj Close_Fri'] - fridays['Adj Close_Mon'])/fridays['Adj Close_Fri']
+# Read CSV into R
+MyData <- read.csv(file="/Users/cynthiacorrea/*code/Stocks_Autoregression/returns_data.csv", header=TRUE, sep=",")
+
+```
+
+```{r}
+
+MyData
+n <- nrow(MyData)
+wReturns=MyData[,2:4]
+wReturns
+```
+
+```{r} 
+#### Efficient Frontier function ####
+# returns here is dummy variable for weekly returns
+eff.frontier <- function (returns, short="no", max.allocation=NULL,
+ risk.premium.up=.5, risk.increment=.005){
+ # return argument should be a m x n matrix with one column per security
+ # short argument is whether short-selling is allowed; default is no (short
+ # selling prohibited)max.allocation is the maximum % allowed for any one
+ # security (reduces concentration) risk.premium.up is the upper limit of the
+ # risk premium modeled (see for loop below) and risk.increment is the
+ # increment (by) value used in the for loop
+ 
+ covariance <- cov(returns)
+ n <- ncol(covariance)
+
+ # Create initial Amat and bvec assuming only equality constraint
+ # (short-selling is allowed, no allocation constraints)
+ Amat <- matrix (1, nrow=n)
+ bvec <- 1
+ meq <- 1
+
+ # Then modify the Amat and bvec if short-selling is prohibited
+ if(short=="no"){
+ Amat <- cbind(1, diag(n))
+ bvec <- c(bvec, rep(0, n))
+ }
+ # 
+ # # And modify Amat and bvec if a max allocation (concentration) is specified
+ if(!is.null(max.allocation)){
+ if(max.allocation > 1 | max.allocation <0){
+ stop("max.allocation must be greater than 0 and less than 1")
+ }
+ if(max.allocation * n < 1){
+ stop("Need to set max.allocation higher; not enough assets to add to 1")
+ }
+ Amat <- cbind(Amat, -diag(n))
+ bvec <- c(bvec, rep(-max.allocation, n))
+ }
+ # 
+ # # Calculate the number of loops
+ loops <- risk.premium.up / risk.increment + 1
+ loop <- 1
+ # 
+ # # Initialize a matrix to contain allocation and statistics
+ # # This is not necessary, but speeds up processing and uses less memory
+ eff <- matrix(nrow=loops, ncol=n+3)
+ # # Now I need to give the matrix column names
+ colnames(eff) <- c(colnames(returns), "Std.Dev", "Exp.Return", "sharpe")
+ # 
+ # # Loop through the quadratic program solver
+ for (i in seq(from=0, to=risk.premium.up, by=risk.increment)){
+ dvec <- colMeans(returns) * i # This moves the solution along the EF
+ if(i==0.2){
+   print("covariance[1,]")
+   print(covariance[1,])
+   print("dvec")
+   print(dvec)
+   print("Amat[1,]")
+   print(Amat[1,])
+   print("bvec")
+   print(bvec)
+ }
+ sol <- solve.QP(covariance, dvec=dvec, Amat=Amat, bvec=bvec, meq=meq)
+ #print(i)
+ eff[loop,"Std.Dev"] <- sqrt(sum(sol$solution*colSums((covariance*sol$solution))))
+ eff[loop,"Exp.Return"] <- as.numeric(sol$solution %*% colMeans(returns))
+ eff[loop,"sharpe"] <- eff[loop,"Exp.Return"] / eff[loop,"Std.Dev"]
+ eff[loop,1:n] <- sol$solution
+ loop <- loop+1
+ #if(i == 0){
+  # print( "hello")
+   #print(sol$solution) 
+    #}
+ }
+ return(as.data.frame(eff))
+}
+
+
+# Run the eff.frontier function based on no short and 50% alloc. restrictions
+eff <- eff.frontier(returns=wReturns, short="no", max.allocation=.50,
+ risk.premium.up=1, risk.increment=.1) #risk.increment=.001 originally
+
+
+# Find the optimal portfolio
+eff.optimal.point <- eff[eff$sharpe==max(eff$sharpe),]
+eff.optimal.point
+
+eff
+```
+
+```{r} 
+# Run the eff.frontier function based on no short and 50% alloc. restrictions
+eff <- eff.frontier(returns=wReturns, short="no", max.allocation=.50,
+ risk.premium.up=1, risk.increment=.2) #risk.increment=.001 originally
+eff
+``` 
+```{r}
+eff
+```
+
+```{r}
+# Find the optimal portfolio
+eff.optimal.point <- eff[eff$sharpe==max(eff$sharpe),]
+eff.optimal.point
+```
+
+```{r}
+# graph efficient frontier
+# Start with color scheme
+ealred <- "#7D110C"
+ealtan <- "#CDC4B6"
+eallighttan <- "#F7F6F0"
+ealdark <- "#423C30"
+```
+
+```{r}
+library(ggplot2)
+diamonds
+```
+
+```{r}
+library(ggplot2)
+ggplot(diamonds)
+#qplot(mtcars$mpg)
+#ggplot(eff, aes(x=Std.Dev, y=Exp.Return))
+```
+
+
+```{r}  
+#ggplot(eff, aes(x=Std.Dev, y=Exp.Return)) + geom_point(alpha=.1, #color=ealdark) #+
+#  geom_point(data=eff.optimal.point, aes(x=Std.Dev, y=Exp.Return, label=sharpe),
+#  color=ealred, size=5) +
+#  annotate(geom="text", x=eff.optimal.point$Std.Dev,
+#  y=eff.optimal.point$Exp.Return,
+#  label=paste("Risk: ",
+#  round(eff.optimal.point$Std.Dev*100, digits=3),"\nReturn: ",
+#  round(eff.optimal.point$Exp.Return*100, digits=4),"%\nSharpe: ",
+#  round(eff.optimal.point$sharpe*100, digits=2), "%", sep=""),
+#  hjust=0, vjust=1.2) +
+#  ggtitle("Efficient Frontier\nand Optimal Portfolio") +
+#  labs(x="Risk (standard deviation of portfolio)", y="Return") +
+#  theme(panel.background=element_rect(fill=eallighttan),
+#  text=element_text(color=ealdark),
+#  plot.title=element_text(size=24, color=ealred)
+#)
+#ggsave("Efficient Frontier.png")
+```
+
+Add a new chunk by clicking the *Insert Chunk* button on the toolbar or by pressing *Cmd+Option+I*.
+
+When you save the notebook, an HTML file containing the code and output will be saved alongside it (click the *Preview* button or press *Cmd+Shift+K* to preview the HTML file).
